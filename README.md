@@ -3,7 +3,90 @@
 本手冊記錄實驗室這台 Jetson Orin Nano 的環境設定、版本、參數與安裝指令。要把專案放到這台機器上時，可以在這裡查到需要配合的設定。
 
 - 系統安裝日期：2026-10-06
-- 最後更新：2026-10-12
+- 最後更新：2026-10-15
+
+---
+
+## 0. 實機部署操作（每次飛行照這裡做）
+
+架構：Agent（DDS）和 mocap 都在 Docker 容器 `humble` 裡執行，本機只負責開容器。
+
+```
+飛控 ──USB 序列線（/dev/ttyUSB0）──→ 容器 humble：MicroXRCEAgent
+                                            ↕ ROS 2（ROS_DOMAIN_ID=42）
+Motive 電腦 192.168.1.2 ──VRPN──→ 容器 humble：drone_mocap（vrpn_mocap + 橋接）
+```
+
+### 0.1 SSH 連入 Jetson
+
+在筆電開終端機或 PowerShell，**每開一個終端機都要 SSH 一次**：
+
+```bash
+ssh ncrl@ncrl.local        # 同一個網路，最方便
+ssh ncrl@<Jetson IP>       # ncrl.local 連不到時；Jetson 上用 hostname -I 查 IP
+ssh ncrl@192.168.55.1      # USB-C 線直連，不需要網路
+```
+
+做動捕時，Jetson 要連在動捕場地的網路（與 Motive 電腦 `192.168.1.2` 同一網段，Jetson 曾分配到 `192.168.1.156`）。細節見第 2 節。
+
+### 0.2 Docker 啟動與多個終端機
+
+容器只有一個（`humble`），**多個終端機都是進入同一個容器**，在容器裡跑的程式彼此看得到。
+
+| 步驟 | 在哪裡 | 指令 |
+|---|---|---|
+| 1. 確認容器狀態 | 本機 | `docker ps -a`（`Up` 執行中，`Exited` 已停止） |
+| 2. 容器已停止時先啟動 | 本機 | `docker start humble` |
+| 3. 進入容器（每個終端機都做） | 本機 | `docker exec -it humble bash` |
+| 離開容器（容器不會停） | 容器 | `exit` |
+| 停止容器 | 本機 | `docker stop humble` |
+
+- 提示字元 `ncrl@ncrl` 是本機，`root@ncrl` 是容器內。
+- 容器已設定開機自動啟動，通常直接做第 3 步即可。
+- 不要用 `docker run`，那會建立一個全新的空容器。
+- 容器內是 root，不需要 `sudo`。
+
+每個終端機的開法：
+
+```
+筆電終端機 → ssh ncrl@ncrl.local → docker exec -it humble bash → 執行該終端機的指令
+```
+
+### 0.3 各終端機的指令
+
+開機：接電池 B（Jetson）→ 約 1 分鐘後 SSH 連入 → 飛控上電。
+
+**終端機 1：Agent（DDS）**
+
+```bash
+MicroXRCEAgent serial --dev /dev/ttyUSB0 -b 921600
+```
+
+看到 `create_participant`、`create_datawriter` 代表飛控已連上。同一時間只能開一個 Agent（本機不要再開）。
+
+**終端機 2：mocap**
+
+```bash
+ros2 launch drone_mocap mocap.launch.py namespace:=MAV2 rigid_body:=MAV2 vrpn_server:=192.168.1.2
+```
+
+- `namespace` 要和飛控 topic 的前綴一樣（目前為 `/MAV2/fmu/...`）。
+- `rigid_body` 要和 Motive 裡的剛體名稱一樣。
+- 不可以再出現 `VRPN connection is bad`；橋接每 5 秒回報的收發數量要持續增加。
+
+**終端機 3：檢查**
+
+```bash
+ros2 topic list | grep MAV2                                                   # 有 /MAV2/fmu/... 與 /vrpn_mocap/MAV2/pose
+ros2 topic hz /vrpn_mocap/MAV2/pose                                           # 動捕資料頻率
+ros2 topic hz /MAV2/fmu/in/vehicle_visual_odometry                            # 送給飛控的頻率
+ros2 topic echo /MAV2/fmu/out/estimator_status_flags --once | grep cs_ev_     # cs_ev_pos/hgt/yaw 全部 true
+ros2 topic echo /MAV2/fmu/out/vehicle_local_position_v1 --once | grep -E "^(x|y|z):"
+```
+
+完整的逐層驗證與方向檢查見第 13 節。
+
+**結束**：降落上鎖 → 拔電池 A → 各終端機 `Ctrl + C` → 本機 `sudo shutdown now` → 電源燈熄滅後拔電池 B。
 
 ---
 
@@ -28,11 +111,17 @@
 | RealSense | `ros2 launch realsense2_camera rs_launch.py`（本機 Jazzy） | 第 6 節 |
 | Docker 容器 | 名稱 `humble`（Ubuntu 22.04 + ROS 2 Humble），進入用 `docker start -ai humble` | 第 10 節 |
 | Humble workspace | 容器內 `/root/shared/ros2_ws`（本機路徑 `~/docker_shared/ros2_ws`） | 第 10 節 |
+| 電源輸入 | DC 孔 9 到 20V、最大 3.5A、中心正極；實機用 4S 電池經 VG60-T2412 降到 12V | 第 4、11 節 |
+| 接飛控的 UART | 40 pin 第 8 腳 TX、第 10 腳 RX、第 6 腳 GND，3.3V；裝置名稱用 `ls /dev/ttyTHS*` 確認 | 第 4、12 節 |
+| Agent（實機） | 在容器內 `MicroXRCEAgent serial --dev /dev/ttyUSB0 -b 921600` | 第 0、12 節 |
+| 無人機 namespace | `MAV2`（topic 為 `/MAV2/fmu/...`） | 第 0、12 節 |
+| Motive 電腦 | `192.168.1.2`，VRPN 埠 3883 | 第 0、13 節 |
 
 ---
 
 ## 目錄
 
+0. [實機部署操作（每次飛行照這裡做）](#0-實機部署操作每次飛行照這裡做)
 1. [目錄結構與環境設定](#1-目錄結構與環境設定)
 2. [SSH](#2-ssh)
 3. [切換GUI、server指令](#3-切換guiserver指令)
@@ -43,6 +132,9 @@
 8. [ROS_DOMAIN_ID（重要）](#8-ros_domain_id重要)
 9. [注意事項與踩過的坑](#9-注意事項與踩過的坑)
 10. [Docker 容器（Ubuntu 22.04 + ROS 2 Humble）](#10-docker-容器ubuntu-2204--ros-2-humble)
+11. [電池供電](#11-電池供電)
+12. [實機部署（Docker + 飛控）](#12-實機部署docker--飛控)
+13. [動捕（Mocap）驗證](#13-動捕mocap驗證)
 
 ---
 
@@ -150,6 +242,64 @@ sudo systemctl start gdm
 | 電源 | 原廠 19V 變壓器，DC 圓孔 |
 | 帳號 / 主機名 | `ncrl` / `ncrl` |
 | 密碼 | 不寫在此，請向負責人取得 |
+
+### 4.1 電源規格
+
+依據 NVIDIA 官方載板規格書（Jetson Orin Nano DevKit Carrier Board Specification）與 NVIDIA 論壇官方回覆。
+
+| 項目 | 規格 |
+|---|---|
+| DC 圓孔輸入電壓 | **9 到 20V**（5V 無法開機） |
+| DC 圓孔最大電流 | **3.5A**（規格書另一表寫 4.2A，以 3.5A 為準） |
+| 接頭 | 5.5 × 2.5mm，**中心為正極** |
+| 原廠變壓器 | 19V |
+| USB-C | 只傳資料，**不能供電** |
+| 模組本身 | 吃 5V，由載板從 9 到 20V 轉換 |
+
+電源模式（`sudo nvpmodel -q` 查詢、`sudo nvpmodel -m <ID>` 切換）：
+
+| ID | 模式 | 功耗 |
+|---|---|---|
+| 0 | 15W | 15W |
+| 1 | 25W | 25W（目前預設） |
+| 2 | MAXN_SUPER | 不設上限（實驗性） |
+
+實測閒置整板耗電約 3.6W（變壓器與電池供電相同）。
+
+電流換算：電流 ＝ 功率 ÷ 電壓。25W 模式加相機等周邊約 35 到 40W，12V 時約 3.3A，接近 DC 孔 3.5A 上限；19V 時約 2.1A。
+
+上電與斷電：
+- 接上電源就會自動開機（按鍵排針 J14 第 5、6 腳短接可關閉自動開機）。
+- 周邊要在上電前接好，不要通電時插拔。
+- 關機先 `sudo shutdown now`，等電源燈熄滅再拔電源。
+
+### 4.2 40 pin 排針（接飛控用）
+
+所有訊號腳為 **3.3V 邏輯準位**，和 Pixhawk 序列埠相容。
+
+| 腳位 | 訊號 | 用途 |
+|---|---|---|
+| 8 | UART1_TXD | 接飛控 TELEM2 的 RX（pin 3） |
+| 10 | UART1_RXD | 接飛控 TELEM2 的 TX（pin 2） |
+| 6 | GND | 接飛控 TELEM2 的 GND（pin 6） |
+| 1、17 | 3.3V | 只能供 100mA，不可供電給其他設備 |
+| 2、4 | 5V | 約 0.5A，不可供電給飛控或相機 |
+
+- 飛控 TELEM2 的 pin 1（+5V）**不要接**。
+- 第 1 腳的位置：板子擺成電源、USB、網路等接頭朝上時，在排針左上角。以板子上印的編號為準。
+- 這組 UART 的裝置名稱會隨 JetPack 版本改變（JetPack 5 為 `/dev/ttyTHS0`，JetPack 6 為 `/dev/ttyTHS1`），用以下指令確認：
+  ```bash
+  ls -l /dev/ttyTHS*
+  sudo dmesg | grep 3100000
+  ```
+- 自我測試：第 8、10 腳短接，執行
+  ```bash
+  stty -F /dev/ttyTHS1 921600 raw -echo
+  cat /dev/ttyTHS1 &
+  echo "hello" > /dev/ttyTHS1
+  ```
+  印出 `hello` 代表 UART 正常，測完 `kill %1`。
+- 模組下方 12 pin 按鍵排針上的 UART 是**除錯主控台**，不要拿來接飛控。
 
 ---
 
@@ -492,6 +642,8 @@ echo "export ROS_DOMAIN_ID=<編號>" >> ~/.bashrc
 | `git describe --tags` 顯示 `v1.18.0-beta…` | clone 時沒有指定分支 | `git checkout release/1.17` 並更新子模組 |
 | `docker` 指令顯示 `permission denied while trying to connect to the docker API` | 帳號不在 `docker` 群組 | `sudo usermod -aG docker $USER` 後重開機，用 `groups` 確認有 `docker` |
 | 執行 `usermod` 後 `groups` 還是沒有 `docker` | 群組設定要重新登入才生效，只開新終端機不夠 | 重開機 |
+| 系統日期不對（曾顯示為 3 天前） | 開發套件斷電後不保存時間，用電池開機又沒連網路時無法校時 | 連網後 `timedatectl` 確認 `System clock synchronized: yes`，否則 `sudo timedatectl set-ntp true`；戶外無網路時要注意時間可能不準 |
+| 飛控上下顛倒安裝 | 飛控會以為自己翻覆，無法解鎖或起飛即翻機 | QGC 設定 `SENS_BOARD_ROT`（倒裝且箭頭朝機頭為 `ROLL_180`），重開飛控後重新校正加速度計、陀螺儀、水平、羅盤，並用姿態儀確認方向 |
 
 **常用檢查指令**
 
@@ -559,5 +711,276 @@ Jetson 本機是 Ubuntu 24.04 + Jazzy。需要 Ubuntu 22.04 + Humble 的專案�
 
 - 容器和本機共用同一個 Linux 核心，不是虛擬機，CPU 與記憶體效能和本機幾乎相同。
 - `ros:humble-perception` 沒有 CUDA，容器裡不能用 GPU 加速。
-- 容器內的 Humble 與本機的 Jazzy 屬於不同版本，ROS 2 不保證跨版本互通。需要互相傳資料的節點放在同一邊。Micro XRCE-DDS Agent 不分 ROS 版本，用本機已安裝的即可。
-- `drone_mocap` 預設的 topic 帶 `/MAV1` namespace。實驗室網路上曾出現其他電腦的 `/MAV1/...` topic，所以 `ROS_DOMAIN_ID` 一定要設定。
+- 容器內的 Humble 與本機的 Jazzy 屬於不同版本，ROS 2 不保證跨版本互通。需要互相傳資料的節點放在同一邊。Micro XRCE-DDS Agent 不分 ROS 版本；實機時 Agent 也裝在容器內執行（見 12.1），避免本機與容器之間收不到資料。
+- `drone_mocap` 預設的 topic 帶 `/MAV1` namespace（這台用 `MAV2`，啟動時帶參數）。實驗室網路上曾出現其他電腦的 `/MAV1/...` 到 `/MAV5/...` topic，所以 `ROS_DOMAIN_ID` 一定要設定。
+
+### 10.6 常用 Docker 指令
+
+都在 Jetson 本機執行。
+
+| 要做的事 | 指令 |
+|---|---|
+| 看容器狀態 | `docker ps -a` |
+| 啟動並進入 | `docker start humble && docker exec -it humble bash` |
+| 不進容器執行一行指令 | `docker exec humble bash -c "source /opt/ros/humble/setup.bash && ros2 topic list"` |
+| 停止 / 重新啟動 | `docker stop humble` / `docker restart humble` |
+| 看輸出紀錄 | `docker logs humble` |
+| 開機自動啟動 | `docker update --restart unless-stopped humble` |
+| 看環境變數 | `docker exec humble env \| grep ROS` |
+| 複製檔案 | `docker cp ~/a.txt humble:/root/`、`docker cp humble:/root/a.txt ~/` |
+| 看映像檔 | `docker images` |
+
+會刪除東西的指令：`docker rm humble`（刪容器）、`docker rmi <映像檔>`（刪映像檔）。
+
+### 10.7 Agent 與容器的 DDS 通訊
+
+- Agent 把飛控資料轉成 DDS 後**透過網路**發送，ROS 2 底層就是 DDS。
+- 容器建立時加了 `--network host` 與 `--ipc host`，和 Jetson 本機共用網路與共用記憶體。
+- 實機時 Agent 改在容器內執行：Agent 在本機時，容器內雖然 `ros2 topic list` 看得到 `/MAV2/fmu/...`，`ros2 topic echo` 卻收不到資料。
+- 飛控 `UXRCE_DDS_DOM_ID` 與容器 `ROS_DOMAIN_ID` 都是 42。
+- Agent 不屬於任何 ROS 版本，容器裡 Humble 能否解讀資料取決於 `px4_msgs` 版本（容器內為 `release/1.17`，與飛控一致）。
+- 同一時間只能開一個 Agent，兩個 Agent 搶同一個序列埠會出錯。
+
+---
+
+## 11. 電池供電
+
+### 11.1 架構
+
+馬達與 Jetson **使用兩顆獨立的 4S 電池**，避免馬達加油門時的電壓瞬降影響 Jetson。
+
+```
+4S 電池 A ──→ 電調、馬達、飛控（電源模組）
+
+4S 電池 B ──→ XT60 ──→ VG60-T2412（降壓）──→ DC 線 ──→ Jetson DC 孔 ──USB 3──→ D435i
+```
+
+唯一連接兩套電源的是 Jetson 與飛控之間 UART 線上的 GND。兩顆電池的正負極不可互接。
+
+### 11.2 使用的元件
+
+| 元件 | 規格 |
+|---|---|
+| 電池 B | 4S 14.8V、4000mAh、60C，XT60 |
+| 降壓模組 | VG60-T2412：輸入 **15 到 40V**，輸出 12V、5A（60W） |
+| DC 線 | 5.5 × 2.5mm 公頭 |
+
+VG60-T2412 接線：
+
+| 線 | 接到 |
+|---|---|
+| 輸入紅（+） | XT60 紅 |
+| 輸入黑（−） | XT60 黑 |
+| **輸出黃（+12V）** | DC 線正極（接圓頭中心） |
+| 輸出黑（−） | DC 線負極 |
+
+DC 線哪條接中心要用三用電表通路檔確認，不要只看顏色。
+
+### 11.3 限制
+
+- VG60-T2412 是 24V 系統用的模組，輸入下限 15V。4S 電池在每顆約 3.75V（總電壓 15V，約剩一半電量）以下就可能停止輸出，所以**電池 B 大約只能用上半段容量**。
+- 平衡頭插低壓警報器，**門檻設 3.8V**，在模組斷電前提醒。
+- 電池 B 只供 Jetson 與 D435i（約 20 到 30W），電流小，幾乎不會有電壓瞬降。若改成和馬達共用電池，大油門時電壓瞬降可能低於 15V，造成 Jetson 突然斷電。
+- 6S 電池（18 到 25.2V）完全符合這顆模組的規格；6S 不可直接接 Jetson（超過 20V）。
+- 目前**沒有裝保險絲**。電池到模組輸入這一段沒有短路保護，建議補上 5A 串接式保險絲，裝在電池與模組之間、越靠近電池越好。
+
+### 11.4 通電前檢查（用三用電表）
+
+| 檢查 | 檔位 | 通過標準 |
+|---|---|---|
+| XT60 兩腳之間 | 通路檔（200 / •)))） | 不能持續嗶（不短路） |
+| DC 頭中心與外殼之間 | 通路檔 | 不能持續嗶 |
+| DC 頭電壓（接電池、不接 Jetson） | 直流電壓 20 | 紅筆插中心、黑筆碰外殼，約 **+12V** |
+
+量電池時旋鈕一定要在「直流電壓」區，在電流或電阻檔碰電池會造成短路。
+
+### 11.5 開關機順序
+
+| 時機 | 順序 |
+|---|---|
+| 開機 | 先接電池 B（Jetson 開機），確認正常後再接電池 A |
+| 關機 | 先拔電池 A → `sudo shutdown now` → 電源燈熄滅後拔電池 B → 拔掉低壓警報器 |
+
+聞到焦味、冒煙或線材發燙：立刻從電池端拔掉 XT60。
+
+---
+
+## 12. 實機部署（Docker + 飛控）
+
+架構：Agent 和 ROS 2 程式都跑在 Docker 容器 `humble` 裡（每次操作的步驟見第 0 節）。
+
+```
+飛控 ──USB 序列線（/dev/ttyUSB0）──→ Docker 容器 humble：MicroXRCEAgent
+                                          ↕ DDS（ROS_DOMAIN_ID 一致）
+                                     Docker 容器 humble：drone_mocap、RealSense、其他程式
+```
+
+### 12.1 一次性設定
+
+**(1) 容器開機自動啟動**（本機）
+
+```bash
+docker update --restart unless-stopped humble
+```
+
+**(2) 容器內環境**
+
+```bash
+docker exec -it humble bash
+apt update && apt install -y ros-humble-vrpn-mocap netbase
+cd /root/shared/ros2_ws
+MAKEFLAGS="-j2" colcon build --parallel-workers 1
+grep -q "humble/setup.bash" ~/.bashrc || echo "source /opt/ros/humble/setup.bash" >> ~/.bashrc
+grep -q "ros2_ws/install" ~/.bashrc || echo "source /root/shared/ros2_ws/install/setup.bash" >> ~/.bashrc
+source ~/.bashrc
+ros2 pkg list | grep -E "px4_msgs|drone_mocap|vrpn"
+exit
+```
+
+`netbase` 提供 `/etc/protocols`。容器映像檔沒有這個檔案時，VRPN 會出現 `getprotobyname() failed` 與 `VRPN connection is bad`，連不上 Motive。
+
+**(2-1) 容器內的 Micro XRCE-DDS Agent**
+
+```bash
+docker exec -it humble bash
+apt update && apt install -y git cmake build-essential
+cd /root
+git clone -b v2.4.3 https://github.com/eProsima/Micro-XRCE-DDS-Agent.git
+cd Micro-XRCE-DDS-Agent && mkdir build && cd build
+cmake ..
+make -j4          # Jetson 沒有 swap，卡住時改 -j2
+make install
+ldconfig /usr/local/lib/
+which MicroXRCEAgent    # 應顯示 /usr/local/bin/MicroXRCEAgent
+```
+
+裝在容器的 `/root` 底下，`docker rm humble` 後要重裝。
+
+**(3) 容器內的 RealSense**（容器裡的程式要用 D435i 時）
+
+```bash
+docker exec -it humble bash -c "apt update && apt install -y ros-humble-librealsense2* ros-humble-realsense2-*"
+```
+
+相機節點要和使用它的程式放在同一邊（容器或本機擇一），同一台相機一次只能被一個程式使用。
+
+**(4) 飛控參數**（QGC，改完重開飛控）
+
+| 參數 | 值 |
+|---|---|
+| `MAV_1_CONFIG` | 0（關掉 TELEM2 上的 MAVLink） |
+| `UXRCE_DDS_CFG` | TELEM2 |
+| `SER_TEL2_BAUD` | 921600 |
+| `UXRCE_DDS_DOM_ID` | 42（與容器 `ROS_DOMAIN_ID` 相同） |
+| `SENS_BOARD_ROT` | 依飛控實際安裝方向 |
+
+namespace：PX4 v1.17 的 `UXRCE_DDS_NS_IDX` 只能產生 `/uav_N` 格式。要用 `MAV2`，需在飛控 SD 卡 `etc/extras.txt` 以 `uxrce_dds_client start -n MAV2` 啟動，或沿用實驗室既有設定。
+
+實驗室的群飛系統曾在網路上對 `/MAV3/fmu/in/vehicle_command` 發送指令。若這台的 namespace 與群飛系統用到的相同，且共用同一個 domain ID，測試前要先和負責群飛系統的人協調。
+
+**(5)（建議）開機不進桌面**，省記憶體，全程用 SSH 操作：
+
+```bash
+sudo systemctl set-default multi-user.target
+```
+
+### 12.2 每次飛行
+
+開機：接電池 B → 約 1 分鐘後用筆電 SSH 連入（`hostname -I` 查 IP，或 `ssh ncrl@ncrl.local`）。
+
+| 終端機 | 位置 | 指令 |
+|---|---|---|
+| 1 | 容器 | `MicroXRCEAgent serial --dev /dev/ttyUSB0 -b 921600` |
+| 2 | 容器 | `ros2 launch drone_mocap mocap.launch.py namespace:=MAV2 rigid_body:=MAV2 vrpn_server:=192.168.1.2` |
+| 3 | 容器 | `ros2 topic list \| grep MAV2`、`ros2 topic echo /MAV2/fmu/out/estimator_status_flags --once \| grep cs_ev_` |
+| 5（需要時） | 容器 | `ros2 launch realsense2_camera rs_launch.py` |
+
+每個容器終端機都要先執行 `docker exec -it humble bash`。
+
+結束：降落上鎖 → 拔電池 A → 各程式 `Ctrl + C` → `sudo shutdown now` → 電源燈熄滅後拔電池 B。
+
+### 12.3 上機前檢查清單
+
+| 項目 | 確認方式 |
+|---|---|
+| 容器狀態 | `docker ps` 顯示 `humble` 為 `Up` |
+| Domain ID | 容器 `echo $ROS_DOMAIN_ID` 與飛控 `UXRCE_DDS_DOM_ID` 相同 |
+| 飛控姿態 | QGC 姿態儀方向正確 |
+| EKF | `cs_ev_pos`、`cs_ev_hgt`、`cs_ev_yaw` 全部 `true` |
+| 電池 B | 低壓警報器顯示 15.2V 以上 |
+| 系統時間 | `timedatectl` |
+
+第一次照流程操作時不裝螺旋槳，完整跑一遍再裝槳試飛。
+
+---
+
+## 13. 動捕（Mocap）驗證
+
+依據 [`drone_mocap`](https://github.com/yuhsiangsean/drone_mocap) 的 README。全程不裝螺旋槳，從資料源頭逐層確認。
+
+```
+Motive ──VRPN──→ vrpn_mocap ──→ drone_mocap ──→ Agent ──→ 飛控 EKF2
+  ①                ②              ③                        ④ ⑤
+```
+
+### 13.1 飛控 EKF2 參數
+
+| 參數 | 值 | 作用 |
+|---|---|---|
+| `EKF2_EV_CTRL` | 11 | 融合動捕的水平位置、高度、航向 |
+| `EKF2_HGT_REF` | 3 | 高度以動捕為準 |
+| `EKF2_BARO_CTRL` | 0 | 關閉氣壓計 |
+| `EKF2_GPS_CTRL` | 0 | 室內無 GPS |
+| `EKF2_MAG_TYPE` | 5 | 航向交給動捕 |
+| `EKF2_EV_DELAY` | 40 | 動捕延遲補償（ms），改完要重開飛控 |
+
+### 13.2 逐層驗證
+
+**① Motive 與網路**
+- Motive 建立剛體 `MAV2`，**建立時飛機水平放地上、機頭朝正前方**。
+- 開啟 VRPN 串流（埠 3883）。
+- Jetson 連上動捕場地網路，`ping <Motive 電腦 IP>`。
+
+**② 動捕資料進入 ROS 2**（容器）
+
+```bash
+ros2 topic list | grep vrpn
+ros2 topic hz /vrpn_mocap/MAV2/pose
+ros2 topic echo /vrpn_mocap/MAV2/pose --once
+```
+
+- 頻率穩定，至少高於 5Hz。
+- 飛機水平靜置時，四元數接近 `w≈1, x≈0, y≈0, z≈0`；否則回 Motive 重建剛體。
+- 出現 `VRPN connection is bad`：檢查 IP 與網路。
+
+**③ 橋接轉換**
+- `drone_mocap` 每 5 秒回報收發數量，兩者都要持續增加。
+- `ros2 topic hz /MAV2/fmu/in/vehicle_visual_odometry` 頻率與 ② 相近。
+
+**④ 飛控融合**（Agent 要開著）
+
+```bash
+ros2 topic echo /MAV2/fmu/out/estimator_status_flags --once | grep cs_ev_
+```
+
+`cs_ev_pos`、`cs_ev_hgt`、`cs_ev_yaw` 全部 `true`。全部 `false` 時檢查 `EKF2_EV_CTRL` 與頻率；橋接有送但飛控沒反應時檢查 Agent、domain ID、namespace。
+
+**⑤ 方向一致**
+
+```bash
+ros2 topic echo /MAV2/fmu/out/vehicle_local_position_v1 --once | grep -E "^(x|y|z):"
+```
+
+飛控為 NED，Motive（Z 朝上）為 ENU：
+
+| 飛控 | 對應動捕 |
+|---|---|
+| x（北） | 動捕 y |
+| y（東） | 動捕 x |
+| z（下） | 動捕 z 的負值 |
+
+手持飛機驗證：舉高 1 公尺 z 減少約 1；往動捕 +y 走 1 公尺 x 增加約 1；往動捕 +x 走 1 公尺 y 增加約 1；原地轉 90 度航向跟著轉；靜止時數值不飄移。
+
+### 13.3 起飛條件
+
+`cs_ev_pos` 未變成 `true` 之前不可起飛。①到⑤全部通過後才裝螺旋槳，第一次以定位模式（Position mode）手動低空懸停，確認穩定再進行自主飛行。
