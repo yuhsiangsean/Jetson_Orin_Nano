@@ -114,7 +114,6 @@ Foxglove → **Open connection** → **Foxglove WebSocket**，輸入 `ws://<Jets
 
 ## 目錄
 
-- [遠端看相機畫面（Foxglove）](#遠端看相機畫面foxglove)
 0. [實機部署操作（每次飛行照這裡做）](#0-實機部署操作每次飛行照這裡做)
 1. [目錄結構與環境設定](#1-目錄結構與環境設定)
 2. [SSH](#2-ssh)
