@@ -3,35 +3,38 @@
 本手冊記錄實驗室這台 Jetson Orin Nano 的環境設定、版本、參數與安裝指令。要把專案放到這台機器上時，可以在這裡查到需要配合的設定。
 
 - 系統安裝日期：2026-10-06
-- 最後更新：2026-10-15
+- 最後更新：2026-10-20
 
 ---
 
-## 0. 實機部署操作（每次飛行照這裡做）
 
-架構：Agent（DDS）和 mocap 都在 Docker 容器 `humble` 裡執行，本機只負責開容器。
+## 0 實機部署操作（每次飛行照這裡做）
 
-```
-飛控 ──USB 序列線（/dev/ttyUSB0）──→ 容器 humble：MicroXRCEAgent
-                                            ↕ ROS 2（ROS_DOMAIN_ID=42）
-Motive 電腦 192.168.1.2 ──VRPN──→ 容器 humble：drone_mocap（vrpn_mocap + 橋接）
-```
+切換GUI、server指令
 
-### 0.1 SSH 連入 Jetson
-
-在筆電開終端機或 PowerShell，**每開一個終端機都要 SSH 一次**：
+記憶體只有 8GB 且與 GPU 共用。開發時用桌面模式，上機實測時切成文字模式可多出約 1GB 記憶體。
 
 ```bash
-ssh ncrl@ncrl.local        # 同一個網路，最方便
-ssh ncrl@<Jetson IP>       # ncrl.local 連不到時；Jetson 上用 hostname -I 查 IP
-ssh ncrl@192.168.55.1      # USB-C 線直連，不需要網路
+sudo systemctl set-default multi-user.target   # 開機不進桌面
+sudo systemctl set-default graphical.target    # 開機進桌面
+sudo reboot                                    # 重新開機後生效
 ```
 
-做動捕時，Jetson 要連在動捕場地的網路（與 Motive 電腦 `192.168.1.2` 同一網段，Jetson 曾分配到 `192.168.1.156`）。細節見第 2 節。
+在文字模式下臨時啟動桌面：
 
-### 0.2 Docker 啟動與多個終端機
+```bash
+sudo systemctl start gdm
+```
 
-容器只有一個（`humble`），**多個終端機都是進入同一個容器**，在容器裡跑的程式彼此看得到。
+
+## 0.1 SSH 連入 Jetson
+
+確認筆電、Jetson兩者同一個網路
+```bash
+ssh ncrl@192.168.1.156       # 同一個網路，最方便
+```
+
+## 0.2 Docker 啟動與多個終端機
 
 | 步驟 | 在哪裡 | 指令 |
 |---|---|---|
@@ -41,20 +44,10 @@ ssh ncrl@192.168.55.1      # USB-C 線直連，不需要網路
 | 離開容器（容器不會停） | 容器 | `exit` |
 | 停止容器 | 本機 | `docker stop humble` |
 
-- 提示字元 `ncrl@ncrl` 是本機，`root@ncrl` 是容器內。
-- 容器已設定開機自動啟動，通常直接做第 3 步即可。
-- 不要用 `docker run`，那會建立一個全新的空容器。
-- 容器內是 root，不需要 `sudo`。
-
-每個終端機的開法：
-
-```
-筆電終端機 → ssh ncrl@ncrl.local → docker exec -it humble bash → 執行該終端機的指令
-```
 
 ### 0.3 各終端機的指令
 
-開機：接電池 B（Jetson）→ 約 1 分鐘後 SSH 連入 → 飛控上電。
+重要!!!!!!!!!!!!!!!!!!!!!!!!!都在docker內運行
 
 **終端機 1：Agent（DDS）**
 
@@ -62,31 +55,30 @@ ssh ncrl@192.168.55.1      # USB-C 線直連，不需要網路
 MicroXRCEAgent serial --dev /dev/ttyUSB0 -b 921600
 ```
 
-看到 `create_participant`、`create_datawriter` 代表飛控已連上。同一時間只能開一個 Agent（本機不要再開）。
-
 **終端機 2：mocap**
 
 ```bash
-ros2 launch drone_mocap mocap.launch.py namespace:=MAV2 rigid_body:=MAV2 vrpn_server:=192.168.1.2
+ros2 launch drone_mocap mocap.launch.py namespace:=MAV1 rigid_body:=MAV1 vrpn_server:=192.168.1.2
 ```
 
-- `namespace` 要和飛控 topic 的前綴一樣（目前為 `/MAV2/fmu/...`）。
-- `rigid_body` 要和 Motive 裡的剛體名稱一樣。
-- 不可以再出現 `VRPN connection is bad`；橋接每 5 秒回報的收發數量要持續增加。
-
-**終端機 3：檢查**
+**終端機 3：開啟相機**
 
 ```bash
-ros2 topic list | grep MAV2                                                   # 有 /MAV2/fmu/... 與 /vrpn_mocap/MAV2/pose
-ros2 topic hz /vrpn_mocap/MAV2/pose                                           # 動捕資料頻率
-ros2 topic hz /MAV2/fmu/in/vehicle_visual_odometry                            # 送給飛控的頻率
-ros2 topic echo /MAV2/fmu/out/estimator_status_flags --once | grep cs_ev_     # cs_ev_pos/hgt/yaw 全部 true
-ros2 topic echo /MAV2/fmu/out/vehicle_local_position_v1 --once | grep -E "^(x|y|z):"
+ros2 launch realsense2_camera rs_launch.py \
+  rgb_camera.color_profile:=640x480x15 \
+  enable_gyro:=true enable_accel:=true unite_imu_method:=2
 ```
 
-完整的逐層驗證與方向檢查見第 13 節。
+**終端機 4：遠端看相機畫面（Foxglove)**
 
-**結束**：降落上鎖 → 拔電池 A → 各終端機 `Ctrl + C` → 本機 `sudo shutdown now` → 電源燈熄滅後拔電池 B。
+```bash
+ros2 launch foxglove_bridge foxglove_bridge_launch.xml
+```
+地面站到瀏覽器開 [app.foxglove.dev](https://app.foxglove.dev)，需註冊免費帳號
+Foxglove → **Open connection** → **Foxglove WebSocket**，輸入 `ws://<Jetson IP>:8765`
+新增 **Image** 面板，topic 選 `/camera/camera/color/image_raw/compressed`。(較不延遲)
+
+---
 
 ---
 
@@ -108,7 +100,8 @@ ros2 topic echo /MAV2/fmu/out/vehicle_local_position_v1 --once | grep -E "^(x|y|
 | PX4 topic | `/fmu/in/...`（送給飛控）、`/fmu/out/...`（飛控送出） | 第 7 節 |
 | 編譯 | `colcon build` 在 `~/ros2_ws` 執行 | 第 6 節 |
 | 記憶體 | 8GB，與 GPU 共用 | 第 4 節 |
-| RealSense | `ros2 launch realsense2_camera rs_launch.py`（本機 Jazzy） | 第 6 節 |
+| RealSense | 本機 Jazzy 為 apt 版（6.5 節）；容器 Humble 為 RSUSB 原始碼編譯版，含 IMU（6.8 節） | 第 6 節 |
+| 遠端看相機畫面 | 容器內 `foxglove_bridge`，筆電 Foxglove 連 `ws://<Jetson IP>:8765` | 最前面 |
 | Docker 容器 | 名稱 `humble`（Ubuntu 22.04 + ROS 2 Humble），進入用 `docker start -ai humble` | 第 10 節 |
 | Humble workspace | 容器內 `/root/shared/ros2_ws`（本機路徑 `~/docker_shared/ros2_ws`） | 第 10 節 |
 | 電源輸入 | DC 孔 9 到 20V、最大 3.5A、中心正極；實機用 4S 電池經 VG60-T2412 降到 12V | 第 4、11 節 |
@@ -121,6 +114,7 @@ ros2 topic echo /MAV2/fmu/out/vehicle_local_position_v1 --once | grep -E "^(x|y|
 
 ## 目錄
 
+- [遠端看相機畫面（Foxglove）](#遠端看相機畫面foxglove)
 0. [實機部署操作（每次飛行照這裡做）](#0-實機部署操作每次飛行照這裡做)
 1. [目錄結構與環境設定](#1-目錄結構與環境設定)
 2. [SSH](#2-ssh)
@@ -146,10 +140,12 @@ ros2 topic echo /MAV2/fmu/out/vehicle_local_position_v1 --once | grep -E "^(x|y|
 ├── Micro-XRCE-DDS-Agent/    Agent 原始碼（已安裝到系統，平常不用動）
 ├── QGroundControl-aarch64.AppImage
 ├── docker_shared/           與 Docker 容器共用的資料夾（容器內是 /root/shared）
+│   ├── librealsense/        RealSense SDK v2.58.4 原始碼（RSUSB 編譯），見 6.8 節
 │   └── ros2_ws/             Humble 的 workspace，只能在容器裡編譯，見第 10 節
 │       └── src/
 │           ├── px4_msgs/
-│           └── drone_mocap/
+│           ├── drone_mocap/
+│           └── realsense-ros/   RealSense ROS wrapper 4.58.4，見 6.8 節
 └── ros2_ws/                 ROS 2 workspace（Jazzy），專案都放這裡
     ├── src/                 套件原始碼
     │   ├── px4_msgs/
@@ -266,6 +262,22 @@ sudo systemctl start gdm
 
 實測閒置整板耗電約 3.6W（變壓器與電池供電相同）。
 
+查詢這台支援的模式與 ID：`sudo nvpmodel -p --verbose`。看實際功耗：`sudo tegrastats`，`VDD_IN` 為整板輸入功率（mW）。
+
+**各模式在 12V（VG60-T2412）供電時的電流（估算）**
+
+輸入電壓不分模式，都是 DC 孔的 9 到 20V；模式改變的是功耗，所以只有電流改變。模式瓦數只算模組，載板、D435i（約 2 到 3.5W）、風扇、Wi-Fi 另計。以下為估算，實際以 `tegrastats` 為準。
+
+| 模式 | 整板估計功耗（含 D435i） | 12V 時電流 | 與 DC 孔 3.5A 上限 |
+|---|---|---|---|
+| 15W（ID 0） | 約 18 到 22W | 約 1.5 到 1.8A | 餘裕大 |
+| 25W（ID 1） | 約 35 到 40W | 約 3 到 3.3A | 接近上限 |
+| MAXN_SUPER（ID 2） | 尖峰可能超過 40W | 可能超過 3.5A | 不建議電池供電使用 |
+
+DC 孔可用最大功率 ＝ 電壓 × 3.5A：12V 約 42W，19V 約 66W。
+
+**飛行時建議切到 15W**（`sudo nvpmodel -m 0`），電流餘裕較大、電池較耐用。
+
 電流換算：電流 ＝ 功率 ÷ 電壓。25W 模式加相機等周邊約 35 到 40W，12V 時約 3.3A，接近 DC 孔 3.5A 上限；19V 時約 2.1A。
 
 上電與斷電：
@@ -345,6 +357,9 @@ sudo systemctl start gdm
 | 映像檔 | `ros:humble-perception`（Ubuntu 22.04 + ROS 2 Humble） | Docker |
 | px4_msgs | `release/1.17` | `/root/shared/ros2_ws/src/px4_msgs` |
 | drone_mocap | GitHub `yuhsiangsean/drone_mocap` | `/root/shared/ros2_ws/src/drone_mocap` |
+| RealSense SDK（librealsense） | v2.58.4，RSUSB 後端，原始碼編譯 | 原始碼 `/root/shared/librealsense`，安裝在容器 `/usr/local` |
+| RealSense ROS wrapper（realsense-ros） | 4.58.4，原始碼編譯 | `/root/shared/ros2_ws/src/realsense-ros` |
+| foxglove_bridge | apt（`ros-humble-foxglove-bridge`） | `/opt/ros/humble` |
 
 ### 5.3 版本之間的對應關係
 
@@ -567,6 +582,106 @@ git clone -b release/1.17 https://github.com/PX4/px4_msgs.git
 git clone https://github.com/yuhsiangsean/drone_mocap.git
 ```
 
+### 6.8 RealSense（容器 Humble，RSUSB 原始碼編譯）
+
+依據 [realsense-ros 官方說明](https://github.com/realsenseai/realsense-ros) 與 [librealsense 官方 repo](https://github.com/IntelRealSense/librealsense)。
+
+**為什麼不用 apt 版**
+
+- 容器內原本用 apt 安裝（`ros-humble-librealsense2*`、`ros-humble-realsense2-*`），影像正常，但開 IMU 時出現 `No HID info provided, IMU is disabled`。
+- apt 版走 Linux 核心驅動（V4L 後端，`rs-enumerate-devices` 的 Physical Port 為 `.../video4linux/video0`）。D435i 的 IMU 透過核心的 HID 感測器模組傳資料。
+- 這台的核心沒有該模組：本機 `sudo modprobe hid_sensor_accel_3d hid_sensor_gyro_3d` 回報 `Module hid_sensor_accel_3d not found in directory /lib/modules/6.8.12-1021-tegra`。
+- 解法：SDK 改用 **RSUSB 後端**從原始碼編譯，直接透過 libusb 讀 IMU，不需要核心模組。apt 的 ROS wrapper 綁定 apt 的 SDK，所以 wrapper 也要從原始碼編譯。
+- 版本對齊 apt 版原本的組合：SDK **v2.58.4** + ROS wrapper **4.58.4**。
+
+**(1) 移除 apt 版**（容器內，先停掉相機節點）
+
+```bash
+apt remove -y 'ros-humble-librealsense2*' 'ros-humble-realsense2-*'
+```
+
+**(2) 編譯 SDK**（容器內，約 30 到 60 分鐘）
+
+```bash
+apt update && apt install -y git cmake build-essential pkg-config libssl-dev libusb-1.0-0-dev libudev-dev
+cd /root/shared
+git clone -b v2.58.4 --depth 1 https://github.com/IntelRealSense/librealsense.git
+cd librealsense && mkdir build && cd build
+cmake .. -DFORCE_RSUSB_BACKEND=ON -DBUILD_EXAMPLES=OFF -DBUILD_GRAPHICAL_EXAMPLES=OFF -DCMAKE_BUILD_TYPE=Release
+make -j2
+make install
+ldconfig
+```
+
+- `-DFORCE_RSUSB_BACKEND=ON` 是讀得到 IMU 的關鍵。
+- clone tag 時出現 `detached HEAD` 是正常的。
+- `librealsense` 不是 ROS 套件，放在 `/root/shared`，不可放進 `ros2_ws/src`。
+- 只用 `-j2`，Jetson 沒有 swap。
+
+**(3) 編譯 ROS wrapper**（容器內）
+
+```bash
+cd /root/shared/ros2_ws/src
+git clone -b 4.58.4 --depth 1 https://github.com/realsenseai/realsense-ros.git
+cd /root/shared/ros2_ws
+MAKEFLAGS=-j2 colcon build --executor sequential --packages-up-to realsense2_camera
+source install/setup.bash
+```
+
+tag 名稱不對時，用 `git ls-remote --tags https://github.com/realsenseai/realsense-ros.git | grep 4.58` 查詢。
+
+**(4) 確認相機**
+
+相機接**藍色 USB 3 孔**。
+
+```bash
+rs-enumerate-devices | head -20
+```
+
+這台 D435i 的資訊：
+
+| 項目 | 值 |
+|---|---|
+| 序號 | 261222078537 |
+| 韌體 | 5.15.1.55 |
+| USB | 3.2（顯示 2.x 代表接錯孔或線材不對） |
+| IMU | BMI085 |
+
+**(5) 啟動與 IMU 參數**
+
+```bash
+ros2 launch realsense2_camera rs_launch.py \
+  rgb_camera.color_profile:=640x480x15 \
+  enable_gyro:=true enable_accel:=true unite_imu_method:=2
+```
+
+| 參數 | 作用 |
+|---|---|
+| `rgb_camera.color_profile` | 彩色影像的 `寬x高x幀率`。飛行時調低，減少運算與頻寬 |
+| `enable_gyro`、`enable_accel` | 打開陀螺儀、加速度計（預設關閉） |
+| `unite_imu_method` | 0：不合併；1：copy；2：線性內插，合併成 `/camera/camera/imu` |
+
+**(6) 主要 topic**
+
+| topic | 內容 |
+|---|---|
+| `/camera/camera/color/image_raw` | 彩色影像 |
+| `/camera/camera/color/image_raw/compressed` | 壓縮彩色影像，遠端看畫面用 |
+| `/camera/camera/depth/image_rect_raw` | 深度影像（預設 848×480、30fps） |
+| `/camera/camera/imu` | 合併後的 IMU（`sensor_msgs/Imu`） |
+| `/camera/camera/accel/sample`、`/camera/camera/gyro/sample` | 原始加速度、角速度 |
+| `/camera/camera/extrinsics/depth_to_*` | 各感測器之間的相對位置 |
+
+檢查：`ros2 topic hz /camera/camera/imu`。靜止平放時，`linear_acceleration` 有一軸接近 ±9.8，`angular_velocity` 三軸接近 0。
+
+**注意事項**
+
+- IMU 訊息只有角速度與加速度，`orientation` 是空的，需要姿態要另接濾波器（例如 `imu_filter_madgwick`）。
+- 相機 IMU 與飛控 IMU 無關，飛控不使用相機 IMU。
+- 啟動時的 `No valid configuration file`、`re-enable the stream`、`HARDWARE_CLOCK` 警告可忽略。
+- SDK 安裝在容器的 `/usr/local`，`docker rm humble` 後要在 `/root/shared/librealsense/build` 重新 `make install && ldconfig`。
+- 本機 Jazzy 的 apt 版（6.5 節）與容器內這份各自獨立。同一台相機一次只能被一個程式開啟，本機與容器不可同時啟動相機。
+
 ---
 
 ## 7. 模擬啟動流程
@@ -765,6 +880,25 @@ Jetson 本機是 Ubuntu 24.04 + Jazzy。需要 Ubuntu 22.04 + Humble 的專案�
 | 降壓模組 | VG60-T2412：輸入 **15 到 40V**，輸出 12V、5A（60W） |
 | DC 線 | 5.5 × 2.5mm 公頭 |
 
+接頭名稱：
+
+| 接頭 | 位置 | 用途 |
+|---|---|---|
+| 平衡頭（JST-XH，4S 為 5 pin，白色小接頭） | 電池 | 充電平衡、插低壓警報器，不供電 |
+| XT60 母頭（黃色） | 電池主電源 | 電池輸出 |
+| XT60 公頭（黃色，帶紅黑線） | 接降壓模組輸入 | 插入電池 XT60 母頭 |
+| DC 圓頭公頭（5.5 × 2.5mm） | 接降壓模組輸出 | 插入 Jetson DC 孔（中心正極） |
+
+電池規格的意思（4000mAh、60C）：
+
+| 項目 | 計算 | 意義 |
+|---|---|---|
+| 容量 4000mAh | 4A 放電約 1 小時 | VG60 輸入下限 15V，實際只用得到上半段 |
+| 最大放電 60C | 4Ah × 60 ＝ 240A | 電池能瞬間輸出極大電流 |
+| 實際 Jetson 這一路 | 整板 20W、電池 15V、轉換效率約 0.9：20 ÷ 15 ÷ 0.9 ≈ 1.5A | 負載決定電流，正常約 1 到 3A |
+
+續航估算：可用電量約 25 到 30Wh，以 15W 模式整板約 20W 計，約 1 小時多。
+
 VG60-T2412 接線：
 
 | 線 | 接到 |
@@ -782,7 +916,7 @@ DC 線哪條接中心要用三用電表通路檔確認，不要只看顏色。
 - 平衡頭插低壓警報器，**門檻設 3.8V**，在模組斷電前提醒。
 - 電池 B 只供 Jetson 與 D435i（約 20 到 30W），電流小，幾乎不會有電壓瞬降。若改成和馬達共用電池，大油門時電壓瞬降可能低於 15V，造成 Jetson 突然斷電。
 - 6S 電池（18 到 25.2V）完全符合這顆模組的規格；6S 不可直接接 Jetson（超過 20V）。
-- 目前**沒有裝保險絲**。電池到模組輸入這一段沒有短路保護，建議補上 5A 串接式保險絲，裝在電池與模組之間、越靠近電池越好。
+- 目前**沒有裝保險絲**。電池到模組輸入這一段沒有短路保護，建議補上 5A 串接式保險絲，裝在電池與模組之間、越靠近電池越好。電池 60C 短路時可放出上百安培，電線數秒內就會燒熔；正常電流只有 1 到 3A，5A 不會誤斷。
 
 ### 11.4 通電前檢查（用三用電表）
 
@@ -858,9 +992,7 @@ which MicroXRCEAgent    # 應顯示 /usr/local/bin/MicroXRCEAgent
 
 **(3) 容器內的 RealSense**（容器裡的程式要用 D435i 時）
 
-```bash
-docker exec -it humble bash -c "apt update && apt install -y ros-humble-librealsense2* ros-humble-realsense2-*"
-```
+照 6.8 節以 RSUSB 從原始碼編譯。apt 版在這台讀不到 IMU。
 
 相機節點要和使用它的程式放在同一邊（容器或本機擇一），同一台相機一次只能被一個程式使用。
 
