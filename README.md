@@ -78,9 +78,37 @@ ros2 launch foxglove_bridge foxglove_bridge_launch.xml
 Foxglove → **Open connection** → **Foxglove WebSocket**，輸入 `ws://<Jetson IP>:8765`
 新增 **Image** 面板，topic 選 `/camera/camera/color/image_raw/compressed`。(較不延遲)
 
----
+### 0.4 hover_test：起飛測試程式
+
+`hover_test` 是簡單的測試程式，用來確認整套系統（Agent、動捕、飛控）能否正常起飛、懸停、移動、降落。
+此程式已經在jatson 裡面了(由郁翔在維護)
+
+
+**終端機 ：飛控節點 `hover_control`**
+
+```bash
+ros2 run hover_test hover_control --ros-args -p namespace:=/MAV1
+```
+
+**終端機 ：指令輸入節點 `hover_commander`**
+
+```bash
+ros2 run hover_test hover_commander
+```
+
+在 `>` 提示字元後輸入指令：
+
+| 輸入 | 作用 |
+|---|---|
+| `1` | 起飛到懸停高度（預設 0.5m） |
+| `2` | 降落並上鎖 |
+| `3` | X 方向前進一步（預設 0.5m） |
+| `4` | Y 方向前進一步（預設 0.5m） |
+| `5 <deg>` | 設定機頭朝向，以預設 30 度/秒漸變轉過去 |
+| `6 <x> <y>` | 飛到絕對座標 (x, y)，單位公尺 |
 
 ---
+
 
 ## 快速查詢
 
