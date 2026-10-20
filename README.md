@@ -26,6 +26,20 @@ sudo reboot                                    # 重新開機後生效
 sudo systemctl start gdm
 ```
 
+檢查目前狀態：
+
+```bash
+systemctl get-default        # 下次開機的模式
+systemctl is-active gdm      # 現在桌面有沒有在跑
+free -h                      # 記憶體使用量
+```
+
+| 指令 | 輸出 | 意思 |
+|---|---|---|
+| `systemctl get-default` | `graphical.target` | 開機會進桌面 |
+| | `multi-user.target` | 開機不進桌面（文字模式） |
+| `systemctl is-active gdm` | `active` | 桌面正在執行，佔用記憶體 |
+| | `inactive` | 沒有桌面，文字模式 |
 
 ## 0.1 SSH 連入 Jetson
 
